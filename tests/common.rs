@@ -25,6 +25,10 @@ pub fn maybe_replace(
     proptest::option::of(replace(fee_strategy))
 }
 
+pub fn maybe_max_weight() -> impl Strategy<Value = Option<u64>> {
+    proptest::option::of(2_000..50_000_u64)
+}
+
 /// Used for constructing a proptest that compares an exhaustive search result with a bnb result
 /// with the given metric.
 ///
@@ -206,6 +210,7 @@ pub struct StrategyParams {
     pub drain_spend_weight: u32,
     pub drain_dust: u64,
     pub n_drain_outputs: usize,
+    pub max_weight: Option<u64>,
 }
 
 impl StrategyParams {
@@ -221,7 +226,7 @@ impl StrategyParams {
                 weight_sum: self.target_weight as u64,
                 n_outputs: self.n_target_outputs,
             },
-            max_weight: None,
+            max_weight: self.max_weight,
         }
     }
 
@@ -458,7 +463,15 @@ pub fn compare_against_benchmarks<M: BnbMetric + Clone>(
             }
         }
         None => {
-            prop_assert!(!cs.is_selection_possible(target));
+            if target.max_weight.is_some() {
+                // With a weight cap, is_selection_possible is one-sided 
+                // (true = possible ignoring the cap), so use exhaustive 
+                // search as the exact oracle.
+                let mut cs = cs.clone();
+                prop_assert!(exhaustive_search(&mut cs, &mut metric).is_none());
+            } else {
+                prop_assert!(!cs.is_selection_possible(target));
+            }
         }
     }
 

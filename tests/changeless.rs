@@ -40,6 +40,7 @@ proptest! {
         drain_spend_weight in 1..=2000_u32, // drain spend weight (wu)
         drain_dust in 100..=1000_u64,       // drain dust (sats)
         n_drain_outputs in 1..150usize,     // the number of drain outputs
+        max_weight in common::maybe_max_weight(),
     ) {
         println!("=======================================");
         let start = std::time::Instant::now();
@@ -68,7 +69,7 @@ proptest! {
                 replace,
                 ..TargetFee::ZERO
             },
-            max_weight: None
+            max_weight
         };
 
         let solutions = cs.bnb_solutions(metrics::Changeless {

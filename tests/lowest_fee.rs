@@ -27,8 +27,10 @@ proptest! {
         drain_spend_weight in 1..=2000_u32, // drain spend weight (wu)
         drain_dust in 100..=1000_u64,       // drain dust (sats)
         n_drain_outputs in 1usize..150,     // the number of drain outputs
+        max_weight in common::maybe_max_weight(),
+
     ) {
-        let params = common::StrategyParams { n_candidates, target_value, n_target_outputs, target_weight, replace, feerate, feerate_lt_diff, drain_weight, drain_spend_weight, drain_dust, n_drain_outputs };
+        let params = common::StrategyParams { n_candidates, target_value, n_target_outputs, target_weight, replace, feerate, feerate_lt_diff, drain_weight, drain_spend_weight, drain_dust, n_drain_outputs, max_weight };
         let candidates = common::gen_candidates(params.n_candidates);
         let change_policy = ChangePolicy::min_value(params.drain_weights(), params.drain_dust);
         let metric = LowestFee { target: params.target(), long_term_feerate: params.long_term_feerate(), change_policy };
@@ -49,8 +51,9 @@ proptest! {
         drain_spend_weight in 1..=2000_u32, // drain spend weight (wu)
         drain_dust in 100..=1000_u64,       // drain dust (sats)
         n_drain_outputs in 1usize..150,     // the number of drain outputs
+        max_weight in common::maybe_max_weight(),
     ) {
-        let params = common::StrategyParams { n_candidates, target_value, n_target_outputs, target_weight, replace, feerate, feerate_lt_diff, drain_weight, drain_spend_weight, drain_dust, n_drain_outputs };
+        let params = common::StrategyParams { n_candidates, target_value, n_target_outputs, target_weight, replace, feerate, feerate_lt_diff, drain_weight, drain_spend_weight, drain_dust, n_drain_outputs, max_weight };
         let candidates = common::gen_candidates(params.n_candidates);
         let change_policy = ChangePolicy::min_value(params.drain_weights(), params.drain_dust);
         let metric = LowestFee { target: params.target(), long_term_feerate: params.long_term_feerate(), change_policy };
@@ -71,10 +74,11 @@ proptest! {
         drain_spend_weight in 1..=2000_u32, // drain spend weight (wu)
         drain_dust in 100..=1000_u64,       // drain dust (sats)
         n_drain_outputs in 1usize..150,     // the number of drain outputs
+        max_weight in common::maybe_max_weight(),
     ) {
         println!("== TEST ==");
 
-        let params = common::StrategyParams { n_candidates, target_value, n_target_outputs, target_weight, replace, feerate, feerate_lt_diff, drain_weight, drain_spend_weight, drain_dust, n_drain_outputs };
+        let params = common::StrategyParams { n_candidates, target_value, n_target_outputs, target_weight, replace, feerate, feerate_lt_diff, drain_weight, drain_spend_weight, drain_dust, n_drain_outputs, max_weight };
         println!("{:?}", params);
 
         let candidates = core::iter::repeat(Candidate {
@@ -98,7 +102,22 @@ proptest! {
             long_term_feerate: params.long_term_feerate(),
             change_policy,
         };
-        let is_impossible = !cs.is_selection_possible(params.target());
+
+        let is_impossible = { 
+            let mut test = CoinSelector::new(&candidates);
+            let mut possible = false; 
+            loop { 
+                if test.is_target_met(params.target()) { 
+                    possible = true; 
+                    break; 
+                } 
+                if !test.select_next() { 
+                    break; 
+                } 
+            } 
+            !possible 
+        };
+
         match common::bnb_search(&mut cs, metric, params.n_candidates * 10) {
             Ok((score, rounds)) => {
                 // the +1 is because the iterator will always try selecting nothing as a solution so we have
@@ -123,9 +142,10 @@ proptest! {
         drain_spend_weight in 1..=2000_u32, // drain spend weight (wu)
         drain_dust in 100..=1000_u64,       // drain dust (sats)
         n_drain_outputs in 1usize..150,     // the number of drain outputs
+        max_weight in common::maybe_max_weight(),
     ) {
 
-        let params = common::StrategyParams { n_candidates, target_value, n_target_outputs, target_weight, replace, feerate, feerate_lt_diff, drain_weight, drain_spend_weight, drain_dust, n_drain_outputs };
+        let params = common::StrategyParams { n_candidates, target_value, n_target_outputs, target_weight, replace, feerate, feerate_lt_diff, drain_weight, drain_spend_weight, drain_dust, n_drain_outputs, max_weight };
         let candidates = common::gen_candidates(params.n_candidates);
         let change_policy = ChangePolicy::min_value(params.drain_weights(), params.drain_dust);
         let metric = LowestFee { target: params.target(), long_term_feerate: params.long_term_feerate(), change_policy };
@@ -148,6 +168,7 @@ fn combined_changeless_metric() {
         drain_dust: 200,
         n_target_outputs: 1,
         n_drain_outputs: 1,
+        max_weight: None,
     };
 
     let candidates = common::gen_candidates(params.n_candidates);
@@ -285,7 +306,7 @@ fn zero_fee_tx() {
             weight_sum: 200 - TX_FIXED_FIELD_WEIGHT - 1,
             n_outputs: 1,
         },
-        max_weight: None,
+        max_weight: Some(3000000),
     };
 
     let candidates = vec![
@@ -321,4 +342,51 @@ fn zero_fee_tx() {
         ),
     };
     let (_score, _rounds) = common::bnb_search(&mut cs, metric, 1000).expect("must find solution");
+}
+
+/// Regression: with `max_weight` set, `LowestFee::bound` used a prefix-only
+/// search (`select_iter().find(is_target_met)`) to bound unmet branches. The
+/// prefix {0, 1} exceeds the weight cap before meeting the value target, so
+/// `bound` returned `None` at the root and BnB reported no solution — but the
+/// non-prefix subset {1, 2} is feasible. Shrunk from
+/// `can_eventually_find_best_solution`. Same params with `max_weight: None`
+/// succeed.
+#[test]
+fn lowest_fee_finds_non_prefix_solution_under_max_weight() {
+    let candidates = vec![
+        Candidate { value: 481_902, weight: 726, input_count: 1, is_segwit: false },
+        Candidate { value: 444_673, weight: 236, input_count: 1, is_segwit: false },
+        Candidate { value: 127_703, weight: 193, input_count: 1, is_segwit: false },
+    ];
+
+    let target = Target {
+        fee: TargetFee::from_feerate(FeeRate::from_sat_per_vb(57.606403)),
+        outputs: TargetOutputs {
+            value_sum: 419_500,
+            weight_sum: 1469,
+            n_outputs: 1,
+        },
+        max_weight: Some(2_000),
+    };
+
+    let drain_weights = DrainWeights {
+        output_weight: 100,
+        spend_weight: 1,
+        n_outputs: 1,
+    };
+    let change_policy = ChangePolicy::min_value(drain_weights, 100);
+    let metric = LowestFee {
+        target,
+        long_term_feerate: FeeRate::from_sat_per_vb(57.606403),
+        change_policy,
+    };
+
+    let mut exp_cs = CoinSelector::new(&candidates);
+    let (exp_score, _) = common::exhaustive_search(&mut exp_cs, &mut metric.clone())
+        .expect("exhaustive search must find the {1, 2} solution");
+
+    let mut cs = CoinSelector::new(&candidates);
+    let (score, _) =
+        common::bnb_search(&mut cs, metric, usize::MAX).expect("bnb must find a solution");
+    assert_eq!(score, exp_score);
 }

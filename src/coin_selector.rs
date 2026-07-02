@@ -111,17 +111,23 @@ impl<'a> CoinSelector<'a> {
         self.selected.contains(&index)
     }
 
-    /// Is meeting this `target` possible with the current selection with this `drain` (i.e. change output).
+    /// Returns whether meeting this `target` is possible with the current candidates.
     /// Note this will respect [`ban`]ned candidates.
     ///
     /// This simply selects all effective inputs at the target's feerate and checks whether we have
     /// enough value.
     ///
+    /// This check ignores [`Target::max_weight`], so it is exact when `max_weight` is `None`. With
+    /// a weight cap it is one-sided: `false` means selection is certainly impossible, while `true`
+    /// means it is possible ignoring the cap (an exact check would require a knapsack-style subset
+    /// search). The cap is enforced by selection itself, which reports
+    /// [`SelectError::MaxWeightExceeded`].
+    ///
     /// [`ban`]: Self::ban
     pub fn is_selection_possible(&self, target: Target) -> bool {
         let mut test = self.clone();
         test.select_all_effective(target.fee.rate);
-        test.is_target_met(target)
+        test.excess(target, Drain::NONE) >= 0
     }
 
     /// Returns true if no candidates have been selected.
